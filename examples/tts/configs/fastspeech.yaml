@@ -1,5 +1,3 @@
-# model: "FastSpeech"
-
 labels: [
     ' ', '!', '"', "'", '(', ')', ',', '-', '.', ':', ';', '?', 'A', 'B',
     'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
@@ -8,23 +6,45 @@ labels: [
     'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
 ]
 
+FastSpeechDataLayer:
+    sample_rate: &sample_rate 22050
+
 AudioToMelSpectrogramPreprocessor:
     normalize: null
     window_size: null
     window_stride: null
     n_window_size: 1024
     n_window_stride: 256
-    window: "hann"
-    features: 80
+    window: 'hann'
+    features: &mel_features 80
     n_fft: 1024
     frame_splicing: 1
     dither: 0.
-    feat_type: "logfbank"
+    feat_type: 'logfbank'
     stft_conv: true
-    sample_rate: 22050
+    sample_rate: *sample_rate
     highfreq: 8000
     preemph: null
     pad_value: -11.52
     mag_power: 1.
-    log_zero_guard_type: "clamp"
-    log_zero_guard_value: 1.0e-5
+    log_zero_guard_type: 'clamp'
+    log_zero_guard_value: 1e-5
+
+FastSpeech:
+    decoder_output_size: 384
+    n_mels: *mel_features
+    max_seq_len: 2048
+    word_vec_dim: 384
+    encoder_n_layer: 6
+    encoder_head: 2
+    encoder_conv1d_filter_size: 1536
+    decoder_n_layer: 6
+    decoder_head: 2
+    decoder_conv1d_filter_size: 1536
+    fft_conv1d_kernel: 3
+    fft_conv1d_padding: 1
+    encoder_output_size: 384
+    duration_predictor_filter_size: 256
+    duration_predictor_kernel_size: 3
+    dropout: 0.1
+    alpha: 1.0
