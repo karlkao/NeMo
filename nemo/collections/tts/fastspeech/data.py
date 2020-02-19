@@ -22,11 +22,17 @@ from nemo.core.neural_types import AxisType, BatchTag, ChannelTag, NeuralType, T
 
 class AdHoc:
     @staticmethod
+    def parser(text):
+        """Parser from Tacotron 2."""
+        return text_norm.text_to_sequence(text, cleaner_names=['english_cleaners'])
+
+    @staticmethod
     def __dynamic_range_compression(x, C=1, clip_val=1e-5):
         return np.log(np.clip(x, a_min=clip_val, a_max=None) * C)
 
     @staticmethod
     def wav_file_to_features(wav_file):
+        """Feature extractor from Tacotron 2."""
         wav, sr = librosa.load(wav_file, sr=22050)
         wav, _ = librosa.effects.trim(wav, frame_length=1024, hop_length=256)
         mel = librosa.feature.melspectrogram(
@@ -74,20 +80,17 @@ class FastSpeechDataset(torch.utils.data.Dataset):
         del labels
         del normalize
 
-        def parser(text):
-            return text_norm.text_to_sequence(text, cleaner_names=['english_cleaners'])
-
         self._audio_text = collections.AudioText(
             audio_files=audio_files,
             durations=durations,
             texts=texts,
-            parser=parser,
+            parser=AdHoc.parser,
             min_duration=min_duration,
             max_duration=max_duration,
         )
-        self._featurizer = asr_parts_features.WaveformFeaturizer(
-            sample_rate=sample_rate, int_values=int_values, augmentor=None
-        )
+        # self._featurizer = asr_parts_features.WaveformFeaturizer(
+        #     sample_rate=sample_rate, int_values=int_values, augmentor=None
+        # )
         self._trim = trim
         self._bos_id = bos_id
         self._eos_id = eos_id

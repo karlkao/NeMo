@@ -59,15 +59,12 @@ class FastSpeechGraph:
             num_workers=num_workers,
             **config.FastSpeechDataLayer,
         )
-        self.preprocessor = nemo_asr.AudioToMelSpectrogramPreprocessor(**config.AudioToMelSpectrogramPreprocessor)
         self.fastspeech = nemo_tts.FastSpeech(**config.FastSpeech, n_src_vocab=n_labels, pad_id=pad_id)
         self.losser = nemo_tts.FastSpeechLoss()
 
-        self.callbacks = []
-
-    def loss(self):
+    def build_loss(self):
+        callbacks = []
         data = self.data_layer()
-        # mel_true, _ = self.preprocessor(input_signal=data.audio, length=data.audio_length)
         mel_pred, dur_pred = self.fastspeech(
             text=data.text, text_pos=data.text_pos, mel_true=data.mel_true, dur_true=data.dur_true,
         )
@@ -79,10 +76,11 @@ class FastSpeechGraph:
             text_pos=data.text_pos,
         )
 
-        self.callbacks.append(
+        callbacks.append(
             nemo.core.SimpleLossLoggerCallback([loss], print_func=lambda x: nemo.logging.info(f'Loss: {x[0].data}'))
         )
-        return loss
+
+        return loss, callbacks
 
 
 def main():
@@ -106,8 +104,9 @@ def main():
 
     steps_per_epoch = math.ceil(len(graph.data_layer) / (args.batch_size * engine.world_size))
     total_steps = args.max_steps if args.max_steps is not None else args.num_epochs * steps_per_epoch
+    loss, callbacks = graph.build_loss()
     engine.train(
-        tensors_to_optimize=[graph.loss()],
+        tensors_to_optimize=[loss],
         optimizer=args.optimizer,
         optimization_params=dict(
             num_epochs=args.num_epochs,
@@ -116,7 +115,7 @@ def main():
             weight_decay=args.weight_decay,
             grad_norm_clip=args.grad_norm_clip,
         ),
-        callbacks=graph.callbacks,
+        callbacks=callbacks,
         lr_policy=lr_policies.CosineAnnealing(total_steps, min_lr=args.min_lr),
     )
 
