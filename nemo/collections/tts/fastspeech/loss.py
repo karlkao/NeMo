@@ -20,12 +20,18 @@ from nemo.core.neural_types import (
 
 
 class FastSpeechLoss(LossNM):
-    """Neural Module wrapper for FastSpeech loss."""
+    """Neural Module Wrapper for Fast Speech Loss.
+
+    Calculates final loss as sum of two: MSE for mel spectrograms and MSE for durations.
+
+    """
 
     @property
     def input_ports(self) -> Optional[Dict[str, NeuralType]]:
         return dict(
-            mel_true=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag), 2: AxisType(ChannelTag)}),
+            mel_true=NeuralType(
+                {0: AxisType(BatchTag), 1: AxisType(MelSpectrogramSignalTag), 2: AxisType(ProcessedTimeTag)}
+            ),
             mel_pred=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag), 2: AxisType(ChannelTag)}),
             dur_true=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag)}),
             dur_pred=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag)}),
@@ -55,6 +61,8 @@ class FastSpeechLoss(LossNM):
             Single 0-dim loss tensor.
 
         """
+
+        mel_true = mel_true.transpose(1, 2)
 
         mel_loss = F.mse_loss(mel_pred, mel_true, reduction='none')
         mel_loss *= mel_true.ne(0).float()

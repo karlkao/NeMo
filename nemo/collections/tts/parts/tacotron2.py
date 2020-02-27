@@ -6,6 +6,7 @@ from torch import nn
 from torch.autograd import Variable
 from torch.nn import functional as F
 
+import nemo
 from .layers import ConvNorm, LinearNorm, get_mask_from_lengths
 
 
@@ -487,7 +488,7 @@ class Decoder(nn.Module):
             alignments += [alignment]
 
             if len(mel_outputs) == self.max_decoder_steps:
-                logging.warning("Reached max decoder steps")
+                nemo.logging.warning(f"Reached max decoder steps {self.max_decoder_steps}")
                 break
 
             decoder_input = mel_output

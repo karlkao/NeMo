@@ -114,7 +114,7 @@ class DurationPredictor(nn.Module):
 
 
 class FastSpeech(nemo_nm.TrainableNM):
-    """FastSpeech."""
+    """FastSpeech Model."""
 
     # noinspection DuplicatedCode
     @property
@@ -122,8 +122,11 @@ class FastSpeech(nemo_nm.TrainableNM):
         return dict(
             text=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag)}),
             text_pos=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag)}),
-            mel_true=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag), 2: AxisType(ChannelTag)}),
+            mel_true=NeuralType(
+                {0: AxisType(BatchTag), 1: AxisType(MelSpectrogramSignalTag), 2: AxisType(ProcessedTimeTag)}
+            ),
             dur_true=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag)}),
+            mel_len=NeuralType({0: AxisType(BatchTag)}),
         )
 
     @property
@@ -194,8 +197,11 @@ class FastSpeech(nemo_nm.TrainableNM):
         self.mel_linear = nn.Linear(decoder_output_size, n_mels, bias=True).to(self._device)
         self.alpha = alpha
 
-    def forward(self, text, text_pos, mel_true=None, dur_true=None):
+    def forward(self, text, text_pos, mel_true=None, dur_true=None, mel_len=None):
+        mel_true = mel_true.transpose(1, 2)
         mel_max_length = mel_true.shape[1]
+
+        # assert mel_true.shape[1] == dur_true.sum(-1).max()
 
         encoder_output, encoder_mask = self.encoder(text, text_pos)
 
@@ -211,7 +217,16 @@ class FastSpeech(nemo_nm.TrainableNM):
                 encoder_output, encoder_mask, alpha=self.alpha
             )
 
+        print(length_regulator_output.shape)
+
         decoder_output, decoder_mask = self.decoder(length_regulator_output, decoder_pos)
         mel_pred = self.mel_linear(decoder_output)
+
+        print(mel_true.shape[1])
+        print(mel_pred.shape[1])
+        print(dur_true.sum(-1).max())
+
+        # assert mel_pred.shape[1] == dur_true.sum(-1).max()
+        # assert dur_pred.sum(-1).max() == dur_true.sum(-1).max()
 
         return mel_pred, dur_pred

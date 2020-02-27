@@ -13,172 +13,141 @@ import torch.nn.functional as F
 
 import nemo
 from nemo.backends.pytorch.nm import DataLayerNM
-from nemo.collections.asr.parts import collections
+from nemo.collections.asr.parts import AudioDataset, WaveformFeaturizer, collections
 from nemo.collections.asr.parts import features as asr_parts_features
 from nemo.collections.asr.parts import parsers
 from nemo.collections.tts.fastspeech import text_norm
 from nemo.core.neural_types import AxisType, BatchTag, ChannelTag, NeuralType, TimeTag
 
 
-class AdHoc:
-    @staticmethod
-    def parser(text):
-        """Parser from Tacotron 2."""
-        return text_norm.text_to_sequence(text, cleaner_names=['english_cleaners'])
-
-    @staticmethod
-    def __dynamic_range_compression(x, C=1, clip_val=1e-5):
-        return np.log(np.clip(x, a_min=clip_val, a_max=None) * C)
-
-    @staticmethod
-    def wav_file_to_features(wav_file):
-        """Feature extractor from Tacotron 2."""
-        wav, sr = librosa.load(wav_file, sr=22050)
-        wav, _ = librosa.effects.trim(wav, frame_length=1024, hop_length=256)
-        mel = librosa.feature.melspectrogram(
-            wav, sr=22050, n_fft=1024, win_length=1024, hop_length=256, n_mels=80, fmin=0.0, fmax=8000.0, power=1.0,
-        )
-        mel = AdHoc.__dynamic_range_compression(mel)
-        return mel
-
-
-class FastSpeechDataset(torch.utils.data.Dataset):
-    """Merges audio, text and alignments examples into one dataset.
-
-    This dataset should assumed particular file structure. Take a look at:
-    https://ngc.nvidia.com/datasets/bSOCUeD5QHO0uyIGDtTphA.
-
-    """
-
-    def __init__(
-        self,
-        data_dir,
-        split_name,
-        labels,
-        normalize,
-        min_duration,
-        max_duration,
-        sample_rate,
-        int_values,
-        trim,
-        bos_id,
-        eos_id,
-    ):
-
-        data_dir = pathlib.Path(data_dir)
-        wavs_dir, alignments_dir = data_dir / 'wavs', data_dir / 'alignments'
-        audio_files, durations, texts, alignments_files = [], [], [], []
-        with open(data_dir / f'{split_name}.json', 'r') as f:
-            for example_dict in json.load(f):
-                name = example_dict['name']
-                audio_files.append(str(wavs_dir / f'{name}.wav'))
-                durations.append(example_dict['duration'])
-                texts.append(example_dict['text'])
-                alignments_files.append(str(alignments_dir / f'{name}.npy'))
-
-        # parser = parsers.ENCharParser(labels=labels, do_normalize=normalize)
-        del labels
-        del normalize
-
-        self._audio_text = collections.AudioText(
-            audio_files=audio_files,
-            durations=durations,
-            texts=texts,
-            parser=AdHoc.parser,
-            min_duration=min_duration,
-            max_duration=max_duration,
-        )
-        # self._featurizer = asr_parts_features.WaveformFeaturizer(
-        #     sample_rate=sample_rate, int_values=int_values, augmentor=None
-        # )
-        self._trim = trim
-        self._bos_id = bos_id
-        self._eos_id = eos_id
-        self._alignments_files = alignments_files
+class FastSpeechDataset:
+    def __init__(self, audio_dataset, durs_dir):
+        self._audio_dataset = audio_dataset
+        self._durs_dir = durs_dir
 
     def __getitem__(self, index):
-        audio_text, alignments_file = self._audio_text[index], self._alignments_files[index]
-        # audio_features = self._featurizer.process(
-        #     audio_text.audio_file, offset=0, duration=audio_text.duration, trim=self._trim
-        # )
-        audio_features = AdHoc.wav_file_to_features(audio_text.audio_file)
-        text = audio_text.text_tokens
-        alignments = list(np.load(alignments_file))
-        if self._bos_id is not None:
-            text = [self._bos_id] + text
-            alignments = [0.0] + alignments
-        if self._eos_id is not None:
-            text = text + [self._eos_id]
-            alignments = alignments + [0.0]
-
-        return {
-            'text': torch.tensor(text, dtype=torch.float),
-            'text_length': torch.tensor(len(text), dtype=torch.long),
-            'mel_true': torch.tensor(audio_features.T, dtype=torch.float),
-            'dur_true': torch.tensor(alignments, dtype=torch.float),
-        }
+        audio, audio_len, text, text_len = self._audio_dataset[index]
+        dur_true = torch.tensor(np.load(os.path.join(self._durs_dir, f'{index}.npy'))).long()
+        return dict(audio=audio, audio_len=audio_len, text=text, text_len=text_len, dur_true=dur_true)
 
     def __len__(self):
-        return len(self._audio_text)
+        return len(self._audio_dataset)
 
 
 class FastSpeechDataLayer(DataLayerNM):
-    # noinspection DuplicatedCode
+    """Data Layer for Fast Speech model.
+
+    Basically, replicated behavior from AudioToText Data Layer, zipped with ground truth durations for additional loss.
+
+    Args:
+        manifest_filepath (str): Dataset parameter.
+            Path to JSON containing data.
+        durs_dir (str): Path to durations arrays directory.
+        labels (list): Dataset parameter.
+            List of characters that can be output by the ASR model.
+            For Jasper, this is the 28 character set {a-z '}. The CTC blank
+            symbol is automatically added later for models using ctc.
+        batch_size (int): batch size
+        sample_rate (int): Target sampling rate for data. Audio files will be
+            resampled to sample_rate if it is not already.
+            Defaults to 16000.
+        int_values (bool): Bool indicating whether the audio file is saved as
+            int data or float data.
+            Defaults to False.
+        eos_id (id): Dataset parameter.
+            End of string symbol id used for seq2seq models.
+            Defaults to None.
+        min_duration (float): Dataset parameter.
+            All training files which have a duration less than min_duration
+            are dropped. Note: Duration is read from the manifest JSON.
+            Defaults to 0.1.
+        max_duration (float): Dataset parameter.
+            All training files which have a duration more than max_duration
+            are dropped. Note: Duration is read from the manifest JSON.
+            Defaults to None.
+        normalize_transcripts (bool): Dataset parameter.
+            Whether to use automatic text cleaning.
+            It is highly recommended to manually clean text for best results.
+            Defaults to True.
+        trim_silence (bool): Whether to use trim silence from beginning and end
+            of audio signal using librosa.effects.trim().
+            Defaults to False.
+        load_audio (bool): Dataset parameter.
+            Controls whether the dataloader loads the audio signal and
+            transcript or just the transcript.
+            Defaults to True.
+        drop_last (bool): See PyTorch DataLoader.
+            Defaults to False.
+        shuffle (bool): See PyTorch DataLoader.
+            Defaults to True.
+        num_workers (int): See PyTorch DataLoader.
+            Defaults to 0.
+        perturb_config (dict): Currently disabled.
+
+    """
+
     @property
     def output_ports(self) -> Optional[Dict[str, NeuralType]]:
         return dict(
+            audio=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag)}),
+            audio_len=NeuralType({0: AxisType(BatchTag)}),
             text=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag)}),
             text_pos=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag)}),
-            mel_true=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag), 2: AxisType(ChannelTag)}),
             dur_true=NeuralType({0: AxisType(BatchTag), 1: AxisType(TimeTag)}),
         )
 
     def __init__(
         self,
-        data_dir: str,
-        split_name: str,
-        labels: List[str],
-        normalize=False,
-        min_duration=None,
-        max_duration=None,
+        manifest_filepath,
+        durs_dir,
+        labels,
+        batch_size,
         sample_rate=16000,
         int_values=False,
-        trim=False,
         bos_id=None,
         eos_id=None,
         pad_id=None,
-        batch_size=32,
+        min_duration=0.1,
+        max_duration=None,
+        normalize_transcripts=True,
+        trim_silence=False,
+        load_audio=True,
+        drop_last=False,
+        shuffle=True,
         num_workers=0,
     ):
         super().__init__()
 
-        self._dataset = FastSpeechDataset(
-            data_dir=data_dir,
-            split_name=split_name,
-            labels=labels,
-            normalize=normalize,
-            min_duration=min_duration,
-            max_duration=max_duration,
-            sample_rate=sample_rate,
-            int_values=int_values,
-            trim=trim,
-            bos_id=bos_id,
-            eos_id=eos_id,
-        )
+        # Set up dataset.
+        self._featurizer = WaveformFeaturizer(sample_rate=sample_rate, int_values=int_values, augmentor=None)
+        dataset_params = {
+            'manifest_filepath': manifest_filepath,
+            'labels': labels,
+            'featurizer': self._featurizer,
+            'max_duration': max_duration,
+            'min_duration': min_duration,
+            'normalize': normalize_transcripts,
+            'trim': trim_silence,
+            'bos_id': bos_id,
+            'eos_id': eos_id,
+            'load_audio': load_audio,
+        }
+        audio_dataset = AudioDataset(**dataset_params)
+        self._dataset = FastSpeechDataset(audio_dataset, durs_dir)
         self._pad_id = pad_id
 
         sampler = None
         if self._placement == nemo.core.DeviceType.AllGpu:
             sampler = torch.utils.data.distributed.DistributedSampler(self._dataset)
-        is_train = split_name == 'train'
+
         self._dataloader = torch.utils.data.DataLoader(
             dataset=self._dataset,
             batch_size=batch_size,
-            shuffle=is_train if sampler is None else False,
+            collate_fn=self._collate,
+            drop_last=drop_last,
+            shuffle=shuffle if sampler is None else False,
             sampler=sampler,
             num_workers=num_workers,
-            collate_fn=self._collate,
-            drop_last=is_train,
         )
 
     def _collate(self, batch):
@@ -196,12 +165,16 @@ class FastSpeechDataLayer(DataLayerNM):
 
         batch = {key: [example[key] for example in batch] for key in batch[0]}
 
+        audio = merge(batch['audio'])
+        audio_len = torch.tensor(batch['audio_len'])
         text = merge(batch['text'], value=self._pad_id or 0, dtype=torch.long)
-        text_pos = make_pos(batch.pop('text_length'))
-        mel_true = merge(batch['mel_true'])
+        text_pos = make_pos(batch.pop('text_len'))
         dur_true = merge(batch['dur_true'])
 
-        return text, text_pos, mel_true, dur_true
+        assert text.shape == text_pos.shape
+        assert text.shape == dur_true.shape
+
+        return audio, audio_len, text, text_pos, dur_true
 
     def __len__(self) -> int:
         return len(self._dataset)

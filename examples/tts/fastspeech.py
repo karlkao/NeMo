@@ -34,7 +34,7 @@ def parse_args():
     )
 
     parser.add_argument('--id', type=str, default='default', help="Experiment identificator for clarity.")
-    parser.add_argument('--data_dir', type=str, help="Dataset root directory path.")
+    parser.add_argument('--durs_dir', type=str, help="Train dataset durations directory path.")
     parser.add_argument('--grad_norm_clip', type=float, default=1.0, help="Gradient clipping.")
     parser.add_argument('--min_lr', type=float, default=1e-5, help="Minimum learning rate to decay to.")
 
@@ -45,35 +45,32 @@ def parse_args():
 
 class FastSpeechGraph:
     def __init__(self, args, config, num_workers):
-        n_labels = len(text_norm.symbols)
-        # bos_id, eos_id, pad_id, n_labels = None, None, n_labels, n_labels + 1
-        bos_id, eos_id, pad_id, n_labels = None, None, 0, n_labels
         self.data_layer = nemo_tts.FastSpeechDataLayer(
-            data_dir=args.data_dir,
-            split_name='train',
-            labels=text_norm.symbols,
-            bos_id=bos_id,
-            eos_id=eos_id,
-            pad_id=pad_id,
+            manifest_filepath=args.train_dataset,
+            durs_dir=args.durs_dir,
+            labels=config.labels,
+            bos_id=len(config.labels),
+            eos_id=len(config.labels) + 1,
+            pad_id=len(config.labels) + 2,
             batch_size=args.batch_size,
             num_workers=num_workers,
             **config.FastSpeechDataLayer,
         )
-        self.fastspeech = nemo_tts.FastSpeech(**config.FastSpeech, n_src_vocab=n_labels, pad_id=pad_id)
+        self.data_preprocessor = nemo_asr.AudioToMelSpectrogramPreprocessor(**config.AudioToMelSpectrogramPreprocessor)
+        self.fastspeech = nemo_tts.FastSpeech(
+            **config.FastSpeech, n_src_vocab=len(config.labels) + 3, pad_id=len(config.labels) + 2
+        )
         self.losser = nemo_tts.FastSpeechLoss()
 
     def build_loss(self):
         callbacks = []
         data = self.data_layer()
+        mel_true, mel_len = self.data_preprocessor(input_signal=data.audio, length=data.audio_len)
         mel_pred, dur_pred = self.fastspeech(
-            text=data.text, text_pos=data.text_pos, mel_true=data.mel_true, dur_true=data.dur_true,
+            text=data.text, text_pos=data.text_pos, mel_true=mel_true, dur_true=data.dur_true, mel_len=mel_len,
         )
         loss = self.losser(
-            mel_true=data.mel_true,
-            mel_pred=mel_pred,
-            dur_true=data.dur_true,
-            dur_pred=dur_pred,
-            text_pos=data.text_pos,
+            mel_true=mel_true, mel_pred=mel_pred, dur_true=data.dur_true, dur_pred=dur_pred, text_pos=data.text_pos,
         )
 
         callbacks.append(
@@ -88,6 +85,7 @@ def main():
     work_dir = Path(args.work_dir) / args.id
     engine = nemo.core.NeuralModuleFactory(
         local_rank=args.local_rank,
+        placement=nemo.core.DeviceType.CPU,
         optimization_level=args.amp_opt_level,
         cudnn_benchmark=args.cudnn_benchmark,
         log_dir=work_dir / 'log',
